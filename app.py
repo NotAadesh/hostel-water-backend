@@ -189,6 +189,3 @@ def dashboard():
         "total_today": total_today,
         "areas": areas_data
     })
-
-if __name__ == "__main__":
-    app.run()
