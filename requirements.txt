@@ -1,5 +1,4 @@
 flask
 pandas
 prophet
-sqlite3
 gunicorn
