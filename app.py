@@ -1,66 +1,51 @@
+import os
 from flask import Flask, request, jsonify
-import sqlite3
 import pandas as pd
+import psycopg2
 from prophet import Prophet
 
 app = Flask(__name__)
-DB_NAME = "database.db"
 
-# ---------------------
-# MASTER AREA LIST
-# ---------------------
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
 ALLOWED_AREAS = [
-    "HOSTEL 1",
-    "HOSTEL 2",
-    "HOSTEL 3",
-    "HOSTEL 4",
-    "HOSTEL 5",
-    "HOSTEL 7",
-    "HOSTEL 8",
-    "HOSTEL 9",
-    "HOSTEL 10",
-    "CAFETERIA 1",
-    "CAFETERIA 2",
-    "ACADEMIC BLOCK",
-    "NOB",
-    "HOUSING FACILITY 1",
-    "HOUSING FACILITY 2",
-    "HOUSING FACILITY 3",
-    "HOUSING FACULTY 4",
-    "HOUSING FACULTY 5"
+    "HOSTEL 1","HOSTEL 2","HOSTEL 3","HOSTEL 4","HOSTEL 5",
+    "HOSTEL 7","HOSTEL 8","HOSTEL 9","HOSTEL 10",
+    "CAFETERIA 1","CAFETERIA 2",
+    "ACADEMIC BLOCK","NOB",
+    "HOUSING FACILITY 1","HOUSING FACILITY 2","HOUSING FACILITY 3",
+    "HOUSING FACULTY 4","HOUSING FACULTY 5"
 ]
 
-# ---------------------
-# INIT DATABASE
-# ---------------------
+def get_connection():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS readings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             hostel_name TEXT,
-            date TEXT,
-            meter_reading REAL,
-            daily_usage REAL,
-            predicted_usage REAL,
+            date DATE,
+            meter_reading FLOAT,
+            daily_usage FLOAT,
+            predicted_usage FLOAT,
             anomaly_flag INTEGER
-        )
+        );
     """)
     conn.commit()
+    cur.close()
     conn.close()
 
 init_db()
 
-# ---------------------
-# PROPHET PREDICTION
-# ---------------------
-def calculate_prediction(hostel):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(
-        "SELECT date, daily_usage FROM readings WHERE hostel_name=?",
+def calculate_prediction(area):
+    conn = get_connection()
+    df = pd.read_sql(
+        "SELECT date, daily_usage FROM readings WHERE hostel_name=%s ORDER BY date",
         conn,
-        params=(hostel,)
+        params=(area,)
     )
     conn.close()
 
@@ -78,60 +63,52 @@ def calculate_prediction(hostel):
 
     return float(round(forecast.iloc[-1]["yhat"], 2))
 
-# ---------------------
-# ANOMALY DETECTION
-# ---------------------
 def detect_anomaly(today_usage, predicted):
     if predicted is None:
         return 0
-    if today_usage > predicted * 1.2:
-        return 1
-    return 0
-
-# ---------------------
-# ROUTES
-# ---------------------
+    return 1 if today_usage > predicted * 1.2 else 0
 
 @app.route("/")
 def home():
-    return "Backend running with Prophet 🚀"
+    return "Backend running with PostgreSQL 🚀"
 
 @app.route("/areas")
-def get_areas():
+def areas():
     return jsonify({"areas": ALLOWED_AREAS})
 
 @app.route("/add_reading", methods=["POST"])
 def add_reading():
     data = request.json
-    hostel = data["hostel_name"]
+    area = data["hostel_name"]
     date = data["date"]
     reading = float(data["meter_reading"])
 
-    if hostel not in ALLOWED_AREAS:
-        return jsonify({"error": "Invalid area name"}), 400
+    if area not in ALLOWED_AREAS:
+        return jsonify({"error": "Invalid area"}), 400
 
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    conn = get_connection()
+    cur = conn.cursor()
 
-    cursor.execute("""
+    cur.execute("""
         SELECT meter_reading FROM readings
-        WHERE hostel_name=?
+        WHERE hostel_name=%s
         ORDER BY date DESC LIMIT 1
-    """, (hostel,))
-    
-    last = cursor.fetchone()
+    """, (area,))
+    last = cur.fetchone()
+
     usage = reading - last[0] if last else 0
 
-    prediction = calculate_prediction(hostel)
+    prediction = calculate_prediction(area)
     anomaly = detect_anomaly(usage, prediction)
 
-    cursor.execute("""
-        INSERT INTO readings 
+    cur.execute("""
+        INSERT INTO readings
         (hostel_name, date, meter_reading, daily_usage, predicted_usage, anomaly_flag)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (hostel, date, reading, usage, prediction, anomaly))
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (area, date, reading, usage, prediction, anomaly))
 
     conn.commit()
+    cur.close()
     conn.close()
 
     return jsonify({
@@ -140,50 +117,23 @@ def add_reading():
         "anomaly_flag": anomaly
     })
 
-@app.route("/hostel/<hostel_name>")
-def hostel_summary(hostel_name):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(
-        "SELECT * FROM readings WHERE hostel_name=? ORDER BY date DESC",
-        conn,
-        params=(hostel_name,)
-    )
-    conn.close()
-
-    if df.empty:
-        return jsonify({"message": "No data for this area"})
-
-    latest = df.iloc[0]
-
-    return jsonify({
-        "area": hostel_name,
-        "latest_usage": float(latest["daily_usage"]),
-        "predicted_usage": latest["predicted_usage"],
-        "anomaly_flag": int(latest["anomaly_flag"])
-    })
-
 @app.route("/dashboard")
 def dashboard():
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM readings", conn)
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT DISTINCT ON (hostel_name)
+        hostel_name, daily_usage, predicted_usage, anomaly_flag
+        FROM readings
+        ORDER BY hostel_name, date DESC
+    """, conn)
     conn.close()
 
     if df.empty:
         return jsonify({"message": "No data"})
 
-    latest = df.sort_values("date").groupby("hostel_name").tail(1)
+    total_today = float(df["daily_usage"].sum())
 
-    areas_data = []
-
-    for _, row in latest.iterrows():
-        areas_data.append({
-            "area": row["hostel_name"],
-            "latest_usage": float(row["daily_usage"]),
-            "predicted_usage": row["predicted_usage"],
-            "anomaly_flag": int(row["anomaly_flag"])
-        })
-
-    total_today = float(latest["daily_usage"].sum())
+    areas_data = df.to_dict(orient="records")
 
     return jsonify({
         "total_today": total_today,
