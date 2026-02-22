@@ -19,7 +19,7 @@ def get_connection():
 
 
 # -----------------------------
-# RESET + CREATE TABLE
+# INIT DATABASE (MANUAL RESET ONLY)
 # -----------------------------
 def init_db():
     conn = get_connection()
@@ -46,7 +46,13 @@ def init_db():
     conn.close()
 
 
-init_db()
+# -----------------------------
+# MANUAL RESET ROUTE
+# -----------------------------
+@app.route("/reset_db")
+def reset_db():
+    init_db()
+    return {"message": "Database reset complete"}
 
 
 # -----------------------------
@@ -79,7 +85,6 @@ def add_reading():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Get previous reading
     cur.execute("""
         SELECT domestic_reading, flush_reading
         FROM readings
@@ -168,7 +173,7 @@ def dashboard():
 
 
 # -----------------------------
-# STRUCTURED EXPORT (LIKE YOUR IMAGE)
+# STRUCTURED EXPORT
 # -----------------------------
 @app.route("/export", methods=["GET"])
 def export_data():
@@ -195,7 +200,6 @@ def export_data():
     if df.empty:
         return {"error": "No data found"}, 404
 
-    # Pivot
     pivot_domestic = df.pivot(index="date", columns="hostel_name", values="domestic_usage")
     pivot_flush = df.pivot(index="date", columns="hostel_name", values="flush_usage")
 
@@ -224,9 +228,6 @@ def export_data():
     )
 
 
-# -----------------------------
-# ROOT
-# -----------------------------
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return {"message": "Domestic + Flush Water System Running"}
+    return {"message": "Domestic + Flush Water Backend Running"}
