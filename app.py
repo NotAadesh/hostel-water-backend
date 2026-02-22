@@ -8,18 +8,25 @@ import pandas as pd
 app = Flask(__name__)
 CORS(app)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
 
 # ----------------------------------
-# DB CONNECTION
+# DATABASE CONNECTION (RENDER SAFE)
 # ----------------------------------
 def get_connection():
-    return psycopg2.connect(DATABASE_URL)
+    url = os.environ.get("DATABASE_URL")
+
+    if not url:
+        raise Exception("DATABASE_URL not set")
+
+    # Fix Render postgres URL format
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+
+    return psycopg2.connect(url)
 
 
 # ----------------------------------
-# INIT DATABASE (MANUAL ONLY)
+# INIT DATABASE (MANUAL RESET ONLY)
 # ----------------------------------
 def init_db():
     conn = get_connection()
@@ -47,7 +54,7 @@ def init_db():
 
 
 # ----------------------------------
-# RESET ROUTE
+# MANUAL RESET ROUTE
 # ----------------------------------
 @app.route("/reset_db")
 def reset_db():
@@ -56,7 +63,7 @@ def reset_db():
 
 
 # ----------------------------------
-# AREAS
+# AREAS LIST
 # ----------------------------------
 AREAS = [
     "HOSTEL 1", "HOSTEL 2", "HOSTEL 3", "HOSTEL 4",
@@ -85,6 +92,7 @@ def add_reading():
     conn = get_connection()
     cur = conn.cursor()
 
+    # Get previous readings
     cur.execute("""
         SELECT domestic_reading, flush_reading
         FROM readings
@@ -173,7 +181,7 @@ def dashboard():
 
 
 # ----------------------------------
-# STRUCTURED EXPORT (STABLE VERSION)
+# STRUCTURED EXPORT (STABLE)
 # ----------------------------------
 @app.route("/export", methods=["GET"])
 def export_data():
@@ -214,7 +222,6 @@ def export_data():
         aggfunc="sum"
     )
 
-    # Ensure all areas appear
     for area in AREAS:
         if area not in pivot_domestic.columns:
             pivot_domestic[area] = 0
