@@ -11,16 +11,16 @@ CORS(app)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
-# -----------------------------
+# ----------------------------------
 # DB CONNECTION
-# -----------------------------
+# ----------------------------------
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
-# -----------------------------
-# INIT DATABASE (MANUAL RESET ONLY)
-# -----------------------------
+# ----------------------------------
+# INIT DATABASE (MANUAL ONLY)
+# ----------------------------------
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
@@ -46,18 +46,18 @@ def init_db():
     conn.close()
 
 
-# -----------------------------
-# MANUAL RESET ROUTE
-# -----------------------------
+# ----------------------------------
+# RESET ROUTE
+# ----------------------------------
 @app.route("/reset_db")
 def reset_db():
     init_db()
     return {"message": "Database reset complete"}
 
 
-# -----------------------------
+# ----------------------------------
 # AREAS
-# -----------------------------
+# ----------------------------------
 AREAS = [
     "HOSTEL 1", "HOSTEL 2", "HOSTEL 3", "HOSTEL 4",
     "HOSTEL 5", "HOSTEL 6", "HOSTEL 7", "HOSTEL 8",
@@ -70,9 +70,9 @@ def get_areas():
     return jsonify({"areas": AREAS})
 
 
-# -----------------------------
+# ----------------------------------
 # ADD READING
-# -----------------------------
+# ----------------------------------
 @app.route("/add_reading", methods=["POST"])
 def add_reading():
     data = request.get_json()
@@ -135,9 +135,9 @@ def add_reading():
     })
 
 
-# -----------------------------
+# ----------------------------------
 # DASHBOARD
-# -----------------------------
+# ----------------------------------
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
 
@@ -172,9 +172,9 @@ def dashboard():
     })
 
 
-# -----------------------------
-# STRUCTURED EXPORT
-# -----------------------------
+# ----------------------------------
+# STRUCTURED EXPORT (STABLE VERSION)
+# ----------------------------------
 @app.route("/export", methods=["GET"])
 def export_data():
     start_date = request.args.get("start_date")
@@ -200,18 +200,36 @@ def export_data():
     if df.empty:
         return {"error": "No data found"}, 404
 
-    pivot_domestic = df.pivot(index="date", columns="hostel_name", values="domestic_usage")
-    pivot_flush = df.pivot(index="date", columns="hostel_name", values="flush_usage")
-
-    combined = pd.concat(
-        [pivot_flush, pivot_domestic],
-        axis=1,
-        keys=["F", "D"]
+    pivot_domestic = df.pivot_table(
+        index="date",
+        columns="hostel_name",
+        values="domestic_usage",
+        aggfunc="sum"
     )
 
-    combined = combined.swaplevel(axis=1)
-    combined = combined.sort_index(axis=1, level=0)
-    combined.reset_index(inplace=True)
+    pivot_flush = df.pivot_table(
+        index="date",
+        columns="hostel_name",
+        values="flush_usage",
+        aggfunc="sum"
+    )
+
+    # Ensure all areas appear
+    for area in AREAS:
+        if area not in pivot_domestic.columns:
+            pivot_domestic[area] = 0
+        if area not in pivot_flush.columns:
+            pivot_flush[area] = 0
+
+    pivot_domestic = pivot_domestic[AREAS]
+    pivot_flush = pivot_flush[AREAS]
+
+    combined = pd.DataFrame()
+    combined["Date"] = pivot_domestic.index
+
+    for area in AREAS:
+        combined[f"{area} F"] = pivot_flush[area].fillna(0).values
+        combined[f"{area} D"] = pivot_domestic[area].fillna(0).values
 
     output = io.BytesIO()
 
@@ -228,6 +246,9 @@ def export_data():
     )
 
 
+# ----------------------------------
+# ROOT
+# ----------------------------------
 @app.route("/")
 def home():
     return {"message": "Domestic + Flush Water Backend Running"}
