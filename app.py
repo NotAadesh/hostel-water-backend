@@ -1,10 +1,7 @@
-import os
-from flask import Flask, request, jsonify
-import pandas as pd
-import psycopg2
-from prophet import Prophet
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from flask import send_file
+import psycopg2
+import os
 import io
 import pandas as pd
 
@@ -13,137 +10,166 @@ CORS(app)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-ALLOWED_AREAS = [
-    "HOSTEL 1","HOSTEL 2","HOSTEL 3","HOSTEL 4","HOSTEL 5",
-    "HOSTEL 7","HOSTEL 8","HOSTEL 9","HOSTEL 10",
-    "CAFETERIA 1","CAFETERIA 2",
-    "ACADEMIC BLOCK","NOB",
-    "HOUSING FACILITY 1","HOUSING FACILITY 2","HOUSING FACILITY 3",
-    "HOUSING FACULTY 4","HOUSING FACULTY 5"
-]
 
+# -----------------------------
+# DB CONNECTION
+# -----------------------------
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
+
+# -----------------------------
+# RESET + CREATE TABLE
+# -----------------------------
 def init_db():
     conn = get_connection()
     cur = conn.cursor()
+
+    cur.execute("DROP TABLE IF EXISTS readings;")
+
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS readings (
+        CREATE TABLE readings (
             id SERIAL PRIMARY KEY,
-            hostel_name TEXT,
+            hostel_name VARCHAR(100),
             date DATE,
-            meter_reading FLOAT,
-            daily_usage FLOAT,
-            predicted_usage FLOAT,
-            anomaly_flag INTEGER
+            domestic_reading FLOAT,
+            flush_reading FLOAT,
+            domestic_usage FLOAT,
+            flush_usage FLOAT,
+            total_usage FLOAT,
+            anomaly_flag INT DEFAULT 0
         );
     """)
+
     conn.commit()
     cur.close()
     conn.close()
 
+
 init_db()
 
-def calculate_prediction(area):
-    conn = get_connection()
-    df = pd.read_sql(
-        "SELECT date, daily_usage FROM readings WHERE hostel_name=%s ORDER BY date",
-        conn,
-        params=(area,)
-    )
-    conn.close()
 
-    if len(df) < 10:
-        return None
+# -----------------------------
+# AREAS
+# -----------------------------
+AREAS = [
+    "HOSTEL 1", "HOSTEL 2", "HOSTEL 3", "HOSTEL 4",
+    "HOSTEL 5", "HOSTEL 6", "HOSTEL 7", "HOSTEL 8",
+    "HOSTEL 9", "HOSTEL 10"
+]
 
-    df = df.rename(columns={"date": "ds", "daily_usage": "y"})
-    df["ds"] = pd.to_datetime(df["ds"])
 
-    model = Prophet(daily_seasonality=True)
-    model.fit(df)
+@app.route("/areas", methods=["GET"])
+def get_areas():
+    return jsonify({"areas": AREAS})
 
-    future = model.make_future_dataframe(periods=1)
-    forecast = model.predict(future)
 
-    return float(round(forecast.iloc[-1]["yhat"], 2))
-
-def detect_anomaly(today_usage, predicted):
-    if predicted is None:
-        return 0
-    return 1 if today_usage > predicted * 1.2 else 0
-
-@app.route("/")
-def home():
-    return "Backend running with PostgreSQL 🚀"
-
-@app.route("/areas")
-def areas():
-    return jsonify({"areas": ALLOWED_AREAS})
-
+# -----------------------------
+# ADD READING
+# -----------------------------
 @app.route("/add_reading", methods=["POST"])
 def add_reading():
-    data = request.json
-    area = data["hostel_name"]
-    date = data["date"]
-    reading = float(data["meter_reading"])
+    data = request.get_json()
 
-    if area not in ALLOWED_AREAS:
-        return jsonify({"error": "Invalid area"}), 400
+    hostel = data["hostel_name"]
+    date_val = data["date"]
+    domestic_today = float(data["domestic_reading"])
+    flush_today = float(data["flush_reading"])
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Get previous reading
+    cur.execute("""
+        SELECT domestic_reading, flush_reading
+        FROM readings
+        WHERE hostel_name = %s
+        ORDER BY date DESC
+        LIMIT 1
+    """, (hostel,))
+
+    prev = cur.fetchone()
+
+    if prev:
+        prev_domestic = prev[0]
+        prev_flush = prev[1]
+    else:
+        prev_domestic = 0
+        prev_flush = 0
+
+    domestic_usage = domestic_today - prev_domestic
+    flush_usage = flush_today - prev_flush
+    total_usage = domestic_usage + flush_usage
+
+    anomaly = 1 if total_usage > 500 else 0
+
+    cur.execute("""
+        INSERT INTO readings (
+            hostel_name, date,
+            domestic_reading, flush_reading,
+            domestic_usage, flush_usage, total_usage,
+            anomaly_flag
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        hostel, date_val,
+        domestic_today, flush_today,
+        domestic_usage, flush_usage, total_usage,
+        anomaly
+    ))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "domestic_usage": domestic_usage,
+        "flush_usage": flush_usage,
+        "total_usage": total_usage,
+        "anomaly_flag": anomaly
+    })
+
+
+# -----------------------------
+# DASHBOARD
+# -----------------------------
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
 
     conn = get_connection()
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT meter_reading FROM readings
-        WHERE hostel_name=%s
-        ORDER BY date DESC LIMIT 1
-    """, (area,))
-    last = cur.fetchone()
+        SELECT hostel_name, total_usage, anomaly_flag
+        FROM readings
+        WHERE date = (SELECT MAX(date) FROM readings)
+    """)
 
-    usage = reading - last[0] if last else 0
+    rows = cur.fetchall()
 
-    prediction = calculate_prediction(area)
-    anomaly = detect_anomaly(usage, prediction)
+    areas_data = []
+    total_today = 0
 
-    cur.execute("""
-        INSERT INTO readings
-        (hostel_name, date, meter_reading, daily_usage, predicted_usage, anomaly_flag)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (area, date, reading, usage, prediction, anomaly))
+    for row in rows:
+        areas_data.append({
+            "hostel_name": row[0],
+            "total_usage": row[1],
+            "anomaly_flag": row[2]
+        })
+        total_today += row[1]
 
-    conn.commit()
     cur.close()
     conn.close()
 
     return jsonify({
-        "daily_usage": usage,
-        "predicted_usage": prediction,
-        "anomaly_flag": anomaly
+        "areas": areas_data,
+        "total_today": total_today
     })
 
-@app.route("/dashboard")
-def dashboard():
-    conn = get_connection()
-    df = pd.read_sql("""
-        SELECT DISTINCT ON (hostel_name)
-        hostel_name, daily_usage, predicted_usage, anomaly_flag
-        FROM readings
-        ORDER BY hostel_name, date DESC
-    """, conn)
-    conn.close()
 
-    if df.empty:
-        return jsonify({"message": "No data"})
-
-    total_today = float(df["daily_usage"].sum())
-
-    areas_data = df.to_dict(orient="records")
-
-    return jsonify({
-        "total_today": total_today,
-        "areas": areas_data
-    })
+# -----------------------------
+# STRUCTURED EXPORT (LIKE YOUR IMAGE)
+# -----------------------------
 @app.route("/export", methods=["GET"])
 def export_data():
     start_date = request.args.get("start_date")
@@ -152,27 +178,55 @@ def export_data():
     if not start_date or not end_date:
         return {"error": "Start and end date required"}, 400
 
-    query = """
-        SELECT hostel_name, date, meter_reading, daily_usage, predicted_usage, anomaly_flag
+    conn = get_connection()
+
+    df = pd.read_sql("""
+        SELECT date,
+               hostel_name,
+               domestic_usage,
+               flush_usage
         FROM readings
         WHERE date BETWEEN %s AND %s
         ORDER BY date ASC
-    """
+    """, conn, params=(start_date, end_date))
 
-    conn = get_connection()
-    df = pd.read_sql(query, conn, params=(start_date, end_date))
     conn.close()
 
     if df.empty:
         return {"error": "No data found"}, 404
 
+    # Pivot
+    pivot_domestic = df.pivot(index="date", columns="hostel_name", values="domestic_usage")
+    pivot_flush = df.pivot(index="date", columns="hostel_name", values="flush_usage")
+
+    combined = pd.concat(
+        [pivot_flush, pivot_domestic],
+        axis=1,
+        keys=["F", "D"]
+    )
+
+    combined = combined.swaplevel(axis=1)
+    combined = combined.sort_index(axis=1, level=0)
+    combined.reset_index(inplace=True)
+
     output = io.BytesIO()
-    df.to_excel(output, index=False)
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        combined.to_excel(writer, sheet_name="Water Report", index=False)
+
     output.seek(0)
 
     return send_file(
         output,
         as_attachment=True,
-        download_name="water_usage_export.xlsx",
+        download_name="structured_water_report.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# -----------------------------
+# ROOT
+# -----------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return {"message": "Domestic + Flush Water System Running"}
