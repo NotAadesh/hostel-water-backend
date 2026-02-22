@@ -4,6 +4,9 @@ import pandas as pd
 import psycopg2
 from prophet import Prophet
 from flask_cors import CORS
+from flask import send_file
+import io
+import pandas as pd
 
 app = Flask(__name__)
 CORS(app)
@@ -141,3 +144,35 @@ def dashboard():
         "total_today": total_today,
         "areas": areas_data
     })
+@app.route("/export", methods=["GET"])
+def export_data():
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    if not start_date or not end_date:
+        return {"error": "Start and end date required"}, 400
+
+    query = """
+        SELECT hostel_name, date, meter_reading, daily_usage, predicted_usage, anomaly_flag
+        FROM readings
+        WHERE date BETWEEN %s AND %s
+        ORDER BY date ASC
+    """
+
+    conn = get_db_connection()
+    df = pd.read_sql(query, conn, params=(start_date, end_date))
+    conn.close()
+
+    if df.empty:
+        return {"error": "No data found"}, 404
+
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="water_usage_export.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
