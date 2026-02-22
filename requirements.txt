@@ -4,3 +4,5 @@ prophet
 gunicorn
 psycopg2-binary
 flask-cors
+pandas
+openpyxl

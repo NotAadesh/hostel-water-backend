@@ -159,7 +159,7 @@ def export_data():
         ORDER BY date ASC
     """
 
-    conn = get_db_connection()
+    conn = get_connection()
     df = pd.read_sql(query, conn, params=(start_date, end_date))
     conn.close()
 
