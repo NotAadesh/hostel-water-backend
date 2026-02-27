@@ -40,11 +40,12 @@ def get_connection():
     return psycopg2.connect(url)
 
 # =========================
-# SAFE USERS TABLE INIT
+# USERS TABLE SAFE INIT (Flask 3 Compatible)
 # =========================
 def create_users_table():
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
@@ -53,13 +54,10 @@ def create_users_table():
             role VARCHAR(50) NOT NULL
         )
     """)
+
     conn.commit()
     cur.close()
     conn.close()
-
-@app.before_first_request
-def initialize_tables():
-    create_users_table()
 
 # =========================
 # ROLE DECORATOR
@@ -71,8 +69,10 @@ def role_required(allowed_roles):
         def wrapper(*args, **kwargs):
             claims = get_jwt()
             role = claims.get("role")
+
             if role not in allowed_roles:
                 return jsonify({"message": "Access denied"}), 403
+
             return fn(*args, **kwargs)
         return wrapper
     return decorator
@@ -80,8 +80,10 @@ def role_required(allowed_roles):
 # =========================
 # AUTH ROUTES
 # =========================
+
 @app.route("/init_admin", methods=["POST"])
 def init_admin():
+
     create_users_table()
 
     data = request.json
@@ -110,6 +112,9 @@ def init_admin():
 
 @app.route("/login", methods=["POST"])
 def login():
+
+    create_users_table()
+
     data = request.json
     username = data["username"]
     password = data["password"]
@@ -141,6 +146,7 @@ def login():
 @app.route("/create_user", methods=["POST"])
 @role_required(["admin"])
 def create_user():
+
     data = request.json
     username = data["username"]
     password = data["password"]
@@ -193,6 +199,7 @@ def get_areas():
 @app.route("/add_reading", methods=["POST"])
 @role_required(["admin","manager","pump_operator"])
 def add_reading():
+
     data = request.get_json()
 
     hostel = data["hostel_name"]
@@ -243,6 +250,7 @@ def add_reading():
 @app.route("/dashboard")
 @role_required(["admin","manager"])
 def dashboard():
+
     conn = get_connection()
     cur = conn.cursor()
 
