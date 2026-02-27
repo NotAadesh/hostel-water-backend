@@ -211,72 +211,98 @@ def dashboard():
     })
 
 
-# -----------------------------
-# TREND + 3 DAY FORECAST
-# -----------------------------
-@app.route("/trend", methods=["GET"])
-def trend():
+from datetime import datetime, timedelta
+import numpy as np
 
-    selected = request.args.get("areas")
-    selected_areas = selected.split(",") if selected else AREAS
+@app.route("/trend")
+def get_trend():
+
+    areas_param = request.args.get("areas")
+
+    if not areas_param:
+        return jsonify({"data": []})
+
+    areas = areas_param.split(",")
 
     conn = get_connection()
+    cur = conn.cursor()
 
-    df = pd.read_sql("""
-        SELECT date,
-               hostel_name,
-               domestic_usage,
-               flush_usage
+    # Get historical data for selected areas
+    cur.execute("""
+        SELECT date, hostel_name, domestic_usage, flush_usage
         FROM readings
+        WHERE hostel_name = ANY(%s)
         ORDER BY date ASC
-    """, conn)
+    """, (areas,))
 
-    conn.close()
+    rows = cur.fetchall()
 
-    if df.empty:
-        return {"error": "No data available"}, 404
+    if not rows:
+        return jsonify({"data": []})
 
-    df = df[df["hostel_name"].isin(selected_areas)]
+    # Group by date
+    historical = {}
 
-    grouped = df.groupby("date").agg({
-        "domestic_usage": "sum",
-        "flush_usage": "sum"
-    }).reset_index()
+    for row in rows:
+        date = row[0]
+        domestic = row[2]
+        flush = row[3]
 
-    domestic_df = grouped.rename(columns={
-        "date": "ds",
-        "domestic_usage": "y"
-    })[["ds", "y"]]
+        if date not in historical:
+            historical[date] = {"domestic": 0, "flush": 0}
 
-    flush_df = grouped.rename(columns={
-        "date": "ds",
-        "flush_usage": "y"
-    })[["ds", "y"]]
+        historical[date]["domestic"] += domestic
+        historical[date]["flush"] += flush
 
-    model_domestic = Prophet()
-    model_domestic.fit(domestic_df)
+    sorted_dates = sorted(historical.keys())
 
-    model_flush = Prophet()
-    model_flush.fit(flush_df)
+    trend_data = []
 
-    future_domestic = model_domestic.make_future_dataframe(periods=3)
-    forecast_domestic = model_domestic.predict(future_domestic)
-
-    future_flush = model_flush.make_future_dataframe(periods=3)
-    forecast_flush = model_flush.predict(future_flush)
-
-    result = []
-
-    for i in range(len(forecast_domestic)):
-        result.append({
-            "date": forecast_domestic["ds"].iloc[i].strftime("%Y-%m-%d"),
-            "domestic": float(forecast_domestic["yhat"].iloc[i]),
-            "flush": float(forecast_flush["yhat"].iloc[i]),
-            "is_forecast": i >= len(grouped)
+    # Add historical data
+    for date in sorted_dates:
+        trend_data.append({
+            "date": date.strftime("%Y-%m-%d"),
+            "domestic": historical[date]["domestic"],
+            "flush": historical[date]["flush"],
+            "is_forecast": False
         })
 
-    return jsonify({"data": result})
+    # -------- FORECAST SECTION --------
 
+    latest_date = sorted_dates[-1]
+
+    # Use last 7 days for simple linear trend
+    last_7 = sorted_dates[-7:] if len(sorted_dates) >= 7 else sorted_dates
+
+    x = np.arange(len(last_7))
+
+    domestic_vals = [historical[d]["domestic"] for d in last_7]
+    flush_vals = [historical[d]["flush"] for d in last_7]
+
+    # Linear regression
+    domestic_coef = np.polyfit(x, domestic_vals, 1)
+    flush_coef = np.polyfit(x, flush_vals, 1)
+
+    # Predict next 3 days
+    for i in range(1, 4):
+
+        next_date = latest_date + timedelta(days=i)
+        future_x = len(last_7) + i - 1
+
+        domestic_pred = domestic_coef[0] * future_x + domestic_coef[1]
+        flush_pred = flush_coef[0] * future_x + flush_coef[1]
+
+        trend_data.append({
+            "date": next_date.strftime("%Y-%m-%d"),
+            "domestic": round(max(domestic_pred, 0), 2),
+            "flush": round(max(flush_pred, 0), 2),
+            "is_forecast": True
+        })
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"data": trend_data})
 
 # -----------------------------
 # EXPORT (Structured)
