@@ -4,15 +4,30 @@ import psycopg2
 import os
 import io
 import pandas as pd
-from prophet import Prophet
+import bcrypt
+import numpy as np
+from datetime import datetime, timedelta
+from functools import wraps
+from flask_jwt_extended import (
+    JWTManager,
+    create_access_token,
+    jwt_required,
+    get_jwt
+)
 
 app = Flask(__name__)
 CORS(app)
 
+# =========================
+# JWT CONFIG
+# =========================
+app.config["JWT_SECRET_KEY"] = "change-this-secret-key"
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
+jwt = JWTManager(app)
 
-# -----------------------------
+# =========================
 # DATABASE CONNECTION
-# -----------------------------
+# =========================
 def get_connection():
     url = os.environ.get("DATABASE_URL")
 
@@ -24,44 +39,143 @@ def get_connection():
 
     return psycopg2.connect(url)
 
-
-# -----------------------------
-# INIT DB (Manual)
-# -----------------------------
-def init_db():
+# =========================
+# USERS TABLE INIT
+# =========================
+def create_users_table():
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("DROP TABLE IF EXISTS readings;")
-
     cur.execute("""
-        CREATE TABLE readings (
+        CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
-            hostel_name VARCHAR(100),
-            date DATE,
-            domestic_reading FLOAT,
-            flush_reading FLOAT,
-            domestic_usage FLOAT,
-            flush_usage FLOAT,
-            total_usage FLOAT,
-            anomaly_flag INT DEFAULT 0
-        );
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            role VARCHAR(50) NOT NULL
+        )
     """)
 
     conn.commit()
     cur.close()
     conn.close()
 
+create_users_table()
 
-@app.route("/reset_db")
-def reset_db():
-    init_db()
-    return {"message": "Database reset complete"}
+# =========================
+# ROLE DECORATOR
+# =========================
+def role_required(allowed_roles):
+    def decorator(fn):
+        @wraps(fn)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            claims = get_jwt()
+            role = claims.get("role")
+
+            if role not in allowed_roles:
+                return jsonify({"message": "Access denied"}), 403
+
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# =========================
+# AUTH ROUTES
+# =========================
+
+@app.route("/init_admin", methods=["POST"])
+def init_admin():
+    data = request.json
+    username = data["username"]
+    password = data["password"]
+
+    hashed_pw = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users WHERE username=%s", (username,))
+    if cur.fetchone():
+        return {"message": "Admin already exists"}, 400
+
+    cur.execute(
+        "INSERT INTO users (username, password, role) VALUES (%s,%s,%s)",
+        (username, hashed_pw.decode("utf-8"), "admin")
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"message": "Admin created successfully"}
 
 
-# -----------------------------
-# AREAS
-# -----------------------------
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    username = data["username"]
+    password = data["password"]
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, password, role FROM users WHERE username=%s", (username,))
+    user = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if not user:
+        return {"message": "Invalid credentials"}, 401
+
+    user_id, hashed_pw, role = user
+
+    if not bcrypt.checkpw(password.encode("utf-8"), hashed_pw.encode("utf-8")):
+        return {"message": "Invalid credentials"}, 401
+
+    token = create_access_token(
+        identity=user_id,
+        additional_claims={"role": role}
+    )
+
+    return {"access_token": token, "role": role}
+
+
+@app.route("/create_user", methods=["POST"])
+@role_required(["admin"])
+def create_user():
+    data = request.json
+    username = data["username"]
+    password = data["password"]
+    role = data["role"]
+
+    if role not in ["manager", "pump_operator"]:
+        return {"message": "Invalid role"}, 400
+
+    hashed_pw = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users WHERE username=%s", (username,))
+    if cur.fetchone():
+        return {"message": "User already exists"}, 400
+
+    cur.execute(
+        "INSERT INTO users (username, password, role) VALUES (%s,%s,%s)",
+        (username, hashed_pw.decode("utf-8"), role)
+    )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"message": "User created successfully"}
+
+# =========================
+# WATER SYSTEM
+# =========================
+
 AREAS = [
     "HOSTEL 1", "HOSTEL 2", "HOSTEL 3", "HOSTEL 4",
     "HOSTEL 5", "HOSTEL 6", "HOSTEL 7", "HOSTEL 8",
@@ -74,16 +188,13 @@ AREAS = [
     "HOUSING FACILITY 5"
 ]
 
-
-@app.route("/areas", methods=["GET"])
+@app.route("/areas")
+@jwt_required()
 def get_areas():
     return jsonify({"areas": AREAS})
 
-
-# -----------------------------
-# ADD READING
-# -----------------------------
 @app.route("/add_reading", methods=["POST"])
+@role_required(["admin", "manager", "pump_operator"])
 def add_reading():
     data = request.get_json()
 
@@ -104,7 +215,6 @@ def add_reading():
     """, (hostel,))
 
     prev = cur.fetchone()
-
     prev_domestic = prev[0] if prev else 0
     prev_flush = prev[1] if prev else 0
 
@@ -140,13 +250,9 @@ def add_reading():
         "anomaly_flag": anomaly
     })
 
-
-# -----------------------------
-# DASHBOARD (All Areas Always)
-# -----------------------------
-@app.route("/dashboard", methods=["GET"])
+@app.route("/dashboard")
+@role_required(["admin", "manager"])
 def dashboard():
-
     conn = get_connection()
     cur = conn.cursor()
 
@@ -210,15 +316,11 @@ def dashboard():
         "top_areas": top_areas
     })
 
-
-from datetime import datetime, timedelta
-import numpy as np
-
 @app.route("/trend")
+@role_required(["admin", "manager"])
 def get_trend():
 
     areas_param = request.args.get("areas")
-
     if not areas_param:
         return jsonify({"data": []})
 
@@ -227,26 +329,22 @@ def get_trend():
     conn = get_connection()
     cur = conn.cursor()
 
-    # Get historical data for selected areas
     cur.execute("""
-        SELECT date, hostel_name, domestic_usage, flush_usage
+        SELECT date, domestic_usage, flush_usage
         FROM readings
         WHERE hostel_name = ANY(%s)
         ORDER BY date ASC
     """, (areas,))
 
     rows = cur.fetchall()
-
     if not rows:
         return jsonify({"data": []})
 
-    # Group by date
     historical = {}
-
     for row in rows:
         date = row[0]
-        domestic = row[2]
-        flush = row[3]
+        domestic = row[1]
+        flush = row[2]
 
         if date not in historical:
             historical[date] = {"domestic": 0, "flush": 0}
@@ -255,10 +353,8 @@ def get_trend():
         historical[date]["flush"] += flush
 
     sorted_dates = sorted(historical.keys())
-
     trend_data = []
 
-    # Add historical data
     for date in sorted_dates:
         trend_data.append({
             "date": date.strftime("%Y-%m-%d"),
@@ -267,25 +363,18 @@ def get_trend():
             "is_forecast": False
         })
 
-    # -------- FORECAST SECTION --------
-
     latest_date = sorted_dates[-1]
 
-    # Use last 7 days for simple linear trend
     last_7 = sorted_dates[-7:] if len(sorted_dates) >= 7 else sorted_dates
-
     x = np.arange(len(last_7))
 
     domestic_vals = [historical[d]["domestic"] for d in last_7]
     flush_vals = [historical[d]["flush"] for d in last_7]
 
-    # Linear regression
     domestic_coef = np.polyfit(x, domestic_vals, 1)
     flush_coef = np.polyfit(x, flush_vals, 1)
 
-    # Predict next 3 days
     for i in range(1, 4):
-
         next_date = latest_date + timedelta(days=i)
         future_x = len(last_7) + i - 1
 
@@ -304,10 +393,8 @@ def get_trend():
 
     return jsonify({"data": trend_data})
 
-# -----------------------------
-# EXPORT (Structured)
-# -----------------------------
-@app.route("/export", methods=["GET"])
+@app.route("/export")
+@role_required(["admin", "manager"])
 def export_data():
 
     start_date = request.args.get("start_date")
@@ -316,10 +403,7 @@ def export_data():
     conn = get_connection()
 
     df = pd.read_sql("""
-        SELECT date,
-               hostel_name,
-               domestic_usage,
-               flush_usage
+        SELECT date, hostel_name, domestic_usage, flush_usage
         FROM readings
         WHERE date BETWEEN %s AND %s
         ORDER BY date ASC
@@ -374,7 +458,6 @@ def export_data():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-
 @app.route("/")
 def home():
-    return {"message": "Full Water Intelligence Backend Running"}
+    return {"message": "Full Water Intelligence Backend Running with Auth"}
